@@ -128,7 +128,7 @@ def fetch_usage(token):
                 retry = int(e.headers.get("Retry-After", ""))
             except (TypeError, ValueError):
                 retry = None
-            return None, "rate-limited", retry or 900
+            return None, "rate-limited", retry or 300
         return None, f"API error {e.code}", None
     except Exception:
         return None, "offline?", None
