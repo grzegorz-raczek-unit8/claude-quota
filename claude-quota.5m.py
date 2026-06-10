@@ -312,8 +312,8 @@ def countdown(iso):
     return f"{mins // 60}:{mins % 60:02d}"
 
 
-def draw_battery(pixels, x, y, utilization, error, text=None, fill_color=None):
-    """One battery pill: body 66x24 px + nub, at (x, y)."""
+def draw_bar(pixels, x, y, utilization, error, text=None, fill_color=None):
+    """One gauge bar: 66x24 px outlined rect, at (x, y)."""
     outline = ERR_OUTLINE if error else OUTLINE
     body_w, body_h, t = 66, 24, 2
     # body outline
@@ -325,8 +325,6 @@ def draw_battery(pixels, x, y, utilization, error, text=None, fill_color=None):
     for cx, cy in [(x, y), (x + body_w - 1, y),
                    (x, y + body_h - 1), (x + body_w - 1, y + body_h - 1)]:
         pixels[cy][cx] = (0, 0, 0, 0)
-    # nub (battery tip)
-    fill_rect(pixels, x + body_w + 1, y + 7, x + body_w + 5, y + body_h - 7, outline)
     if error or utilization is None:
         return
     # fill, battery-style: color shifts as the window fills up
@@ -350,8 +348,10 @@ def draw_battery(pixels, x, y, utilization, error, text=None, fill_color=None):
 
 def menu_bar_image(results):
     letter_w, gap, logo_w = 10, 4, 34  # logo badge: 26 px + 8 px gap
-    cell_w = letter_w + gap + 66 + 5  # letter + gap + body + nub
     n = len(results)
+    # a single bar needs no letter label — the logo already explains it
+    label_w = 0 if n == 1 else letter_w + gap
+    cell_w = label_w + 66
     width, height = logo_w + n * cell_w + (n - 1) * 12, 32
     pixels = [[(0, 0, 0, 0)] * width for _ in range(height)]
     draw_logo(pixels, 0, 3)
@@ -368,9 +368,10 @@ def menu_bar_image(results):
         elif five and five["utilization"] >= 100:
             # 5-hour window exhausted: countdown to reset instead of "100"
             text = countdown(five.get("resets_at"))
-        draw_letter(pixels, x, 9, name[0], OUTLINE)
-        draw_battery(pixels, x + letter_w + gap, 4, utilization=util,
-                     error=bool(err), text=text, fill_color=fill_color)
+        if n > 1:
+            draw_letter(pixels, x, 9, name[0], OUTLINE)
+        draw_bar(pixels, x + label_w, 4, utilization=util,
+                 error=bool(err), text=text, fill_color=fill_color)
     return base64.b64encode(encode_png(width, height, pixels)).decode()
 
 

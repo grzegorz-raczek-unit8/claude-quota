@@ -1,17 +1,16 @@
 # claude-quota
 
-Battery-style menu bar gauges for your Claude Code quota — one pill per
-account, like this:
+Menu bar gauges for your Claude Code quota — one bar per account, like this:
 
 ![menu bar screenshot](docs/menubar.png)
 
 *(drawn for dark menu bars — white outlines)*
 
-- Each pill shows the **5-hour-window utilization** for one account, colored
+- Each bar shows the **5-hour-window utilization** for one account, colored
   green / orange (≥70%) / red (≥90%).
-- When the 5-hour window is fully used, the pill shows a **countdown until
+- When the 5-hour window is fully used, the bar shows a **countdown until
   reset** (`4:28`) instead of the percentage.
-- When the **weekly limit** is hit, the pill turns **black** with a countdown
+- When the **weekly limit** is hit, the bar turns **black** with a countdown
   to the weekly reset (`2D`) — that's the harder cap, whatever the 5-hour
   window says.
 - The dropdown lists full detail for every account inline: 5-hour and weekly
@@ -56,8 +55,8 @@ next cycle.
 
 By default the plugin auto-discovers accounts: every `~/.claude` /
 `~/.claude-*` config directory that has a Claude Code Keychain entry gets a
-pill, labeled by the directory suffix (`~/.claude-work` → `W`). A single
-auto-discovered account is simply labeled `C` (for Claude).
+bar, labeled by the directory suffix (`~/.claude-work` → `W`). A single
+auto-discovered account shows no letter label — just the bar.
 
 To pin or rename accounts (e.g. you use multiple `CLAUDE_CONFIG_DIR`s), create
 `~/.config/claude-quota/accounts` with one `path [label]` per line:
