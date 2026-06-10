@@ -30,6 +30,7 @@ import json
 import os
 import struct
 import subprocess
+import sys
 import time
 import urllib.request
 import urllib.error
@@ -38,6 +39,24 @@ from datetime import datetime
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 ACCOUNTS_FILE = os.path.expanduser("~/.config/claude-quota/accounts")
+HIDDEN_FILE = os.path.expanduser("~/.config/claude-quota/hidden")
+
+
+def load_hidden():
+    """Labels whose menu bar gauge is hidden (dropdown detail stays)."""
+    try:
+        with open(HIDDEN_FILE) as f:
+            return {line.strip() for line in f if line.strip()}
+    except OSError:
+        return set()
+
+
+def toggle_hidden(label):
+    hidden = load_hidden()
+    hidden.symmetric_difference_update({label})
+    os.makedirs(os.path.dirname(HIDDEN_FILE), exist_ok=True)
+    with open(HIDDEN_FILE, "w") as f:
+        f.write("".join(f"{name}\n" for name in sorted(hidden)))
 
 
 # ---- account discovery ----
@@ -346,13 +365,15 @@ def draw_bar(pixels, x, y, utilization, error, text=None, fill_color=None):
         tx += 12
 
 
-def menu_bar_image(results):
+def menu_bar_image(results, show_letters=None):
     letter_w, gap, logo_w = 10, 4, 34  # logo badge: 26 px + 8 px gap
     n = len(results)
     # a single bar needs no letter label — the logo already explains it
-    label_w = 0 if n == 1 else letter_w + gap
+    if show_letters is None:
+        show_letters = n > 1
+    label_w = letter_w + gap if show_letters else 0
     cell_w = label_w + 66
-    width, height = logo_w + n * cell_w + (n - 1) * 12, 32
+    width, height = max(logo_w, logo_w + n * cell_w + (n - 1) * 12), 32
     pixels = [[(0, 0, 0, 0)] * width for _ in range(height)]
     draw_logo(pixels, 0, 3)
     for i, (name, usage, err) in enumerate(results):
@@ -368,7 +389,7 @@ def menu_bar_image(results):
         elif five and five["utilization"] >= 100:
             # 5-hour window exhausted: countdown to reset instead of "100"
             text = countdown(five.get("resets_at"))
-        if n > 1:
+        if show_letters:
             draw_letter(pixels, x, 9, name[0], OUTLINE)
         draw_bar(pixels, x + label_w, 4, utilization=util,
                  error=bool(err), text=text, fill_color=fill_color)
@@ -407,6 +428,10 @@ def window_line(label, window):
 
 
 def main():
+    if len(sys.argv) >= 3 and sys.argv[1] == "toggle-hidden":
+        toggle_hidden(sys.argv[2])
+        return
+
     accounts = discover_accounts()
     if not accounts:
         print("◔ ? | color=orange")
@@ -424,24 +449,35 @@ def main():
             usage, err = fetch_usage_cached(config_dir, token)
         results.append((label, usage, err))
 
+    hidden = load_hidden()
+    visible = [r for r in results if r[0] not in hidden]
     try:
-        print(f"| image={menu_bar_image(results)}")
+        print(f"| image={menu_bar_image(visible, show_letters=len(results) > 1)}")
     except Exception:
         # fallback: plain text if rendering ever breaks
         parts = []
-        for name, usage, err in results:
+        for name, usage, err in visible:
             five = (usage or {}).get("five_hour")
             parts.append(f"{name[0]} {five['utilization']:.0f}" if five
                          else f"{name[0]} ⚠")
-        print(f"◔ {' · '.join(parts)}")
+        print(f"◔ {' · '.join(parts) or '…'}")
+
+    script = os.path.realpath(__file__)
+
+    def toggle_line(name):
+        verb = "Show in menu bar" if name in hidden else "Hide from menu bar"
+        return (f"--{verb} | bash={script} param1=toggle-hidden "
+                f"param2={name} terminal=false refresh=true")
 
     for name, usage, err in results:
         print("---")
         if err:
             print(f"{name}: ⚠ {err} | color=orange")
+            print(toggle_line(name))
             continue
         five, week = usage.get("five_hour"), usage.get("seven_day")
-        print(f"{name}")
+        print(f"{name} (hidden)" if name in hidden else name)
+        print(toggle_line(name))
         if five:
             print(window_line("5-hour", five))
         if week:

@@ -59,12 +59,17 @@ bar, labeled by the directory suffix (`~/.claude-work` → `W`). A single
 auto-discovered account shows no letter label — just the bar.
 
 To pin or rename accounts (e.g. you use multiple `CLAUDE_CONFIG_DIR`s), create
-`~/.config/claude-quota/accounts` with one `path [label]` per line:
+`~/.config/claude-quota/accounts` with one `path [label]` per line
+(single-word labels):
 
 ```
 ~/.claude-work Work
 ~/.claude-priv Priv
 ```
+
+To hide an account's menu bar gauge (its dropdown detail stays), use
+**Hide from menu bar** under that account's row in the dropdown — or edit
+`~/.config/claude-quota/hidden` (one label per line).
 
 Multiple accounts via `CLAUDE_CONFIG_DIR` look like this in your shell rc:
 
