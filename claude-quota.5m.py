@@ -111,7 +111,7 @@ def get_token(config_dir):
 
 
 def fetch_usage(token):
-    """Return (usage dict, error)."""
+    """Return (usage dict, error, retry_after_seconds)."""
     req = urllib.request.Request(USAGE_URL, headers={
         "Authorization": f"Bearer {token}",
         "anthropic-beta": "oauth-2025-04-20",
@@ -119,13 +119,67 @@ def fetch_usage(token):
     })
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read()), None
+            return json.loads(resp.read()), None, None
     except urllib.error.HTTPError as e:
         if e.code == 401:
-            return None, "token rejected — run that CLI once to refresh"
-        return None, f"API error {e.code}"
+            return None, "token rejected — run that CLI once to refresh", None
+        if e.code == 429:
+            try:
+                retry = int(e.headers.get("Retry-After", ""))
+            except (TypeError, ValueError):
+                retry = None
+            return None, "rate-limited", retry or 900
+        return None, f"API error {e.code}", None
     except Exception:
-        return None, "offline?"
+        return None, "offline?", None
+
+
+# Cache keeps requests bounded no matter how often SwiftBar re-runs the
+# script (manual refreshes, plugin reloads, etc.): at most one request per
+# account per CACHE_TTL, and a 429 backs off until the server says retry.
+CACHE_DIR = os.path.expanduser("~/.cache/claude-quota")
+CACHE_TTL = 240  # seconds
+
+
+def fetch_usage_cached(config_dir, token):
+    """Return (usage dict, error). Serves cached data when fresh enough,
+    rate-limited, or as a fallback on transient errors."""
+    key = hashlib.sha256(config_dir.encode()).hexdigest()[:8]
+    path = os.path.join(CACHE_DIR, f"{key}.json")
+    now = time.time()
+    cached = {}
+    try:
+        with open(path) as f:
+            cached = json.load(f)
+    except Exception:
+        pass
+
+    if cached.get("usage") and now - cached.get("fetched_at", 0) < CACHE_TTL:
+        return cached["usage"], None
+    if now < cached.get("backoff_until", 0):
+        if cached.get("usage"):
+            return cached["usage"], None
+        return None, "rate-limited — retrying later"
+
+    usage, err, retry_after = fetch_usage(token)
+
+    def save(data):
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(path, "w") as f:
+                json.dump(data, f)
+        except Exception:
+            pass
+
+    if usage:
+        save({"fetched_at": now, "usage": usage})
+        return usage, None
+    if retry_after:
+        save({**cached, "backoff_until": now + retry_after})
+    if cached.get("usage"):
+        # transient failure: stale data beats an error pill
+        return cached["usage"], None
+    return None, err
 
 
 # ---- menu bar image (battery pills as a retina PNG) ----
@@ -366,7 +420,7 @@ def main():
         token, err = get_token(config_dir)
         usage = None
         if not err:
-            usage, err = fetch_usage(token)
+            usage, err = fetch_usage_cached(config_dir, token)
         results.append((label, usage, err))
 
     try:
