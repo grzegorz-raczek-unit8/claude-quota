@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # <xbar.title>Claude Quota</xbar.title>
-# <xbar.version>v1.1</xbar.version>
+# <xbar.version>v1.2</xbar.version>
 # <xbar.desc>Battery-style menu bar gauges for Claude Code quota, per account.</xbar.desc>
 # <xbar.abouturl>https://github.com/grzegorz-raczek-unit8/claude-quota</xbar.abouturl>
 # <swiftbar.hideAbout>true</swiftbar.hideAbout>
@@ -203,18 +203,34 @@ def fetch_usage_cached(config_dir, token):
 
 # ---- menu bar image (battery pills as a retina PNG) ----
 # Drawn at 2x pixels with a 144-dpi pHYs chunk so macOS shows it at half
-# size, crisp on retina.
+# size, crisp on retina. Outlines, labels and the mascot follow the menu
+# bar appearance (black on light, white on dark), like the system icons.
 
-OUTLINE = (255, 255, 255, 255)
+WHITE = (255, 255, 255, 255)
 ERR_OUTLINE = (255, 159, 10, 255)
 GREEN = (52, 199, 89, 255)
 ORANGE = (255, 159, 10, 255)
 RED = (255, 59, 48, 255)
 BLACK = (0, 0, 0, 255)
-CLAUDE_ORANGE = (217, 119, 87, 255)
+
+
+def is_dark_menu_bar():
+    """SwiftBar exports OS_APPEARANCE; fall back to the global default."""
+    appearance = os.environ.get("OS_APPEARANCE")
+    if appearance:
+        return appearance.lower() == "dark"
+    try:
+        out = subprocess.run(
+            ["defaults", "read", "-g", "AppleInterfaceStyle"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return True
+    return out.returncode == 0 and "Dark" in out.stdout
+
 
 # Claude Code mascot (simplified pixel critter), 11x11 cells drawn at 2x
-# scale; "." inside the body shows the white badge through (eyes)
+# scale; "." inside the body lets the menu bar show through (eyes)
 LOGO = [
     ".XXXXXXXXX.",
     "XXXXXXXXXXX",
@@ -301,22 +317,15 @@ def draw_letter(pixels, x0, y0, ch, color, scale=2):
                           x0 + (c + 1) * scale, y0 + (r + 1) * scale, color)
 
 
-def draw_logo(pixels, x0, y0, scale=2):
-    # white rounded badge behind the starburst, for contrast on dark menu bars
-    size = len(LOGO) * scale + 4
-    fill_rect(pixels, x0, y0, x0 + size, y0 + size, OUTLINE)
-    for cx in (x0, x0 + size - 1):
-        for cy in (y0, y0 + size - 1):
-            dx = 1 if cx == x0 else -1
-            dy = 1 if cy == y0 else -1
-            for px, py in [(cx, cy), (cx + dx, cy), (cx, cy + dy)]:
-                pixels[py][px] = (0, 0, 0, 0)
+def draw_logo(pixels, x0, y0, fg, scale=2):
+    # monochrome mascot in the menu bar foreground color, per macOS
+    # menu bar extra guidelines (matches the other status icons)
     for r, row in enumerate(LOGO):
         for c, v in enumerate(row):
             if v == "X":
                 fill_rect(pixels, x0 + 2 + c * scale, y0 + 2 + r * scale,
                           x0 + 2 + (c + 1) * scale, y0 + 2 + (r + 1) * scale,
-                          CLAUDE_ORANGE)
+                          fg)
 
 
 def countdown(iso):
@@ -331,9 +340,9 @@ def countdown(iso):
     return f"{mins // 60}:{mins % 60:02d}"
 
 
-def draw_bar(pixels, x, y, utilization, error, text=None, fill_color=None):
+def draw_bar(pixels, x, y, fg, utilization, error, text=None, fill_color=None):
     """One gauge bar: 66x24 px outlined rect, at (x, y)."""
-    outline = ERR_OUTLINE if error else OUTLINE
+    outline = ERR_OUTLINE if error else fg
     body_w, body_h, t = 66, 24, 2
     # body outline
     fill_rect(pixels, x, y, x + body_w, y + t, outline)
@@ -358,15 +367,17 @@ def draw_bar(pixels, x, y, utilization, error, text=None, fill_color=None):
     # exact percentage (or countdown override), centered inside the pill
     if text is None:
         text = f"{utilization:.0f}"
+    text_color = WHITE if fill_color == BLACK else fg
     text_w = len(text) * 10 + (len(text) - 1) * 2
     tx = x + (body_w - text_w) // 2
     for ch in text:
-        draw_letter(pixels, tx, y + (body_h - 14) // 2, ch, OUTLINE)
+        draw_letter(pixels, tx, y + (body_h - 14) // 2, ch, text_color)
         tx += 12
 
 
 def menu_bar_image(results, show_letters=None):
-    letter_w, gap, logo_w = 10, 4, 34  # logo badge: 26 px + 8 px gap
+    fg = WHITE if is_dark_menu_bar() else BLACK
+    letter_w, gap, logo_w = 10, 4, 34  # mascot: 26 px + 8 px gap
     n = len(results)
     # a single bar needs no letter label — the logo already explains it
     if show_letters is None:
@@ -375,7 +386,7 @@ def menu_bar_image(results, show_letters=None):
     cell_w = label_w + 66
     width, height = max(logo_w, logo_w + n * cell_w + (n - 1) * 12), 32
     pixels = [[(0, 0, 0, 0)] * width for _ in range(height)]
-    draw_logo(pixels, 0, 3)
+    draw_logo(pixels, 0, 3, fg)
     for i, (name, usage, err) in enumerate(results):
         x = logo_w + i * (cell_w + 12)
         five = (usage or {}).get("five_hour")
@@ -390,8 +401,8 @@ def menu_bar_image(results, show_letters=None):
             # 5-hour window exhausted: countdown to reset instead of "100"
             text = countdown(five.get("resets_at"))
         if show_letters:
-            draw_letter(pixels, x, 9, name[0], OUTLINE)
-        draw_bar(pixels, x + label_w, 4, utilization=util,
+            draw_letter(pixels, x, 9, name[0], fg)
+        draw_bar(pixels, x + label_w, 4, fg, utilization=util,
                  error=bool(err), text=text, fill_color=fill_color)
     return base64.b64encode(encode_png(width, height, pixels)).decode()
 

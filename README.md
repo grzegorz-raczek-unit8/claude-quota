@@ -4,7 +4,8 @@ Menu bar gauges for your Claude Code quota — one bar per account, like this:
 
 ![menu bar screenshot](docs/menubar.png)
 
-*(drawn for dark menu bars — white outlines)*
+*(dark menu bar shown — outlines, labels and the mascot follow the menu bar
+appearance, so light mode gets black-on-light)*
 
 - Each bar shows the **5-hour-window utilization** for one account, colored
   green / orange (≥70%) / red (≥90%).
@@ -47,7 +48,8 @@ cd claude-quota
 ```
 
 Either install path sets up [SwiftBar](https://github.com/swiftbar/SwiftBar)
-via Homebrew if you don't have it. If an account shows ⚠, its token went
+via Homebrew if you don't have it, and adds it to your Login Items so the
+gauges come back after a reboot. If an account shows ⚠, its token went
 stale from disuse — run that `claude` CLI once and the widget recovers on the
 next cycle.
 
@@ -81,4 +83,5 @@ claude-priv() { CLAUDE_CONFIG_DIR="$HOME/.claude-priv" command claude "$@"; }
 ## Uninstall
 
 Delete `claude-quota.5m.py` from your SwiftBar plugin folder
-(`~/.swiftbar` by default).
+(`~/.swiftbar` by default). If you no longer use SwiftBar, also remove it
+from System Settings → General → Login Items.
