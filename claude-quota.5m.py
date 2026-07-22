@@ -498,9 +498,11 @@ def main():
                 print(window_line(label, usage[key]))
         extra = usage.get("extra_usage") or {}
         if extra.get("is_enabled") and extra.get("used_credits"):
-            # API reports credits in cents
+            # API reports credits in cents; monthly_limit is None when uncapped
+            monthly_limit = extra.get("monthly_limit")
+            limit_str = f"{monthly_limit / 100:.0f}" if monthly_limit is not None else "∞"
             print(f"extra   {extra['used_credits'] / 100:.2f} / "
-                  f"{extra['monthly_limit'] / 100:.0f} "
+                  f"{limit_str} "
                   f"{extra.get('currency', '')} | font=Menlo")
     print("---")
     print("Refresh now | refresh=true")
