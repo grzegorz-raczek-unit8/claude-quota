@@ -7,9 +7,13 @@
 # <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
 # <swiftbar.hideLastUpdated>false</swiftbar.hideLastUpdated>
 #
-# Reads Claude Code OAuth tokens from the macOS Keychain (read-only; never
-# refreshes or rewrites them) and queries the same usage endpoint that
-# Claude Code's /usage screen uses.
+# Reads Claude Code OAuth tokens from the macOS Keychain and queries the
+# same usage endpoint that Claude Code's /usage screen uses. When a token
+# has expired (or the API rejects it), the plugin runs the standard OAuth
+# refresh-token flow itself and writes the refreshed credentials back to
+# the Keychain, so Claude Code picks them up too — no need to launch the
+# CLI just to refresh. The previous credentials are backed up under
+# ~/.cache/claude-quota/ before each write.
 #
 # Accounts are auto-discovered from ~/.claude and ~/.claude-* config dirs
 # that have a Keychain entry. To pin/label accounts explicitly, create
@@ -28,6 +32,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -105,28 +110,177 @@ def discover_accounts():
     return accounts
 
 
-# ---- data fetching ----
+# ---- token refresh ----
+# Claude Code's own public OAuth client; the refresh flow is the same one
+# the CLI runs at startup when its access token has aged out.
 
-def get_token(config_dir):
-    """Return (token, error). Reads the Claude Code keychain entry."""
+OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+REFRESH_TIMEOUT = 15    # seconds, network
+REFRESH_MARGIN = 60     # refresh once less than this much validity is left
+REFRESH_INTERVAL = 60   # never refresh an account more often than this
+
+STALE_ERROR = "token stale — run that CLI once to refresh"
+
+
+def read_creds(config_dir):
+    """Return (full stored credential JSON dict, error)."""
     try:
         out = subprocess.run(
             ["security", "find-generic-password",
              "-s", keychain_service(config_dir), "-w"],
             capture_output=True, text=True, timeout=10,
         )
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, OSError):
         return None, "keychain timeout"
     if out.returncode != 0:
         return None, "no keychain entry — log in with that CLI once"
     try:
-        creds = json.loads(out.stdout)["claudeAiOauth"]
-    except (json.JSONDecodeError, KeyError):
+        stored = json.loads(out.stdout)
+    except json.JSONDecodeError:
         return None, "unexpected credential format"
+    if not isinstance(stored, dict) or not isinstance(
+            stored.get("claudeAiOauth"), dict):
+        return None, "unexpected credential format"
+    return stored, None
+
+
+def keychain_account(service):
+    """The 'acct' attribute of the keychain entry, needed to rewrite it."""
+    try:
+        out = subprocess.run(
+            ["security", "find-generic-password", "-s", service],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if out.returncode != 0:
+        return None
+    text = (out.stdout or "") + (out.stderr or "")
+    match = re.search(r'"acct"<blob>="((?:[^"\\]|\\.)*)"', text)
+    if not match:
+        return None
+    return match.group(1).encode().decode("unicode_escape")
+
+
+def write_creds(service, stored, previous=None):
+    """Rewrite the keychain entry, backing up `previous` (the JSON text it
+    is replacing) so a botched write stays recoverable."""
+    account = keychain_account(service)
+    if account is None:
+        return False
+    payload = json.dumps(stored, separators=(",", ":"))
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        backup = os.path.join(CACHE_DIR, f"{service}.creds.bak")
+        fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(previous if previous is not None else payload)
+    except OSError:
+        pass  # a missing backup is not worth skipping the refresh over
+    try:
+        out = subprocess.run(
+            ["security", "add-generic-password", "-U",
+             "-a", account, "-s", service, "-w", payload],
+            capture_output=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return out.returncode == 0
+
+
+def claim_refresh_slot(service):
+    """Rate guard: at most one refresh attempt per account per minute."""
+    stamp = os.path.join(CACHE_DIR, f"{service}.refresh")
+    now = time.time()
+    try:
+        if now - os.path.getmtime(stamp) < REFRESH_INTERVAL:
+            return False
+    except OSError:
+        pass
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(stamp, "w"):
+            pass
+    except OSError:
+        pass
+    return True
+
+
+def refresh_token(config_dir, creds):
+    """Exchange the stored refresh token for a fresh access token.
+
+    `creds` is the claudeAiOauth sub-object. On success the refreshed
+    credentials are written back to the Keychain (all other keys in the
+    stored JSON preserved verbatim) and the new access token is returned.
+    Returns (token, error); never raises."""
+    service = keychain_service(config_dir)
+    refresh = (creds or {}).get("refreshToken")
+    if not refresh:
+        return None, STALE_ERROR
+    if not claim_refresh_slot(service):
+        return None, STALE_ERROR
+    body = json.dumps({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh,
+        "client_id": OAUTH_CLIENT_ID,
+    }).encode()
+    req = urllib.request.Request(
+        OAUTH_TOKEN_URL, data=body, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=REFRESH_TIMEOUT) as resp:
+            payload = json.loads(resp.read())
+    except Exception:
+        return None, STALE_ERROR
+    access = payload.get("access_token") if isinstance(payload, dict) else None
+    if not access:
+        return None, STALE_ERROR
+    try:
+        store_refreshed(config_dir, payload)
+    except Exception:
+        pass  # token is usable this run even if persisting it failed
+    return access, None
+
+
+def store_refreshed(config_dir, payload):
+    """Merge a token response into the stored credential JSON and save it."""
+    stored, err = read_creds(config_dir)
+    if err:
+        return False
+    previous = json.dumps(stored, separators=(",", ":"))
+    creds = stored["claudeAiOauth"]
+    creds["accessToken"] = payload["access_token"]
+    if payload.get("refresh_token"):
+        creds["refreshToken"] = payload["refresh_token"]
+    expires_in = payload.get("expires_in")
+    if expires_in:
+        creds["expiresAt"] = int((time.time() + expires_in) * 1000)
+    return write_creds(keychain_service(config_dir), stored, previous)
+
+
+# ---- data fetching ----
+
+def get_token(config_dir):
+    """Return (token, error). Reads the Claude Code keychain entry, and
+    refreshes the token in place when it has expired (or is about to)."""
+    stored, err = read_creds(config_dir)
+    if err:
+        return None, err
+    creds = stored["claudeAiOauth"]
     expires_at = creds.get("expiresAt")
-    if expires_at and expires_at / 1000 < time.time():
-        return None, "token stale — run that CLI once to refresh"
+    if expires_at and expires_at / 1000 - REFRESH_MARGIN < time.time():
+        return refresh_token(config_dir, creds)
     return creds.get("accessToken"), None
+
+
+def force_refresh(config_dir):
+    """Refresh regardless of the stored expiry (used after a 401)."""
+    stored, err = read_creds(config_dir)
+    if err:
+        return None, err
+    return refresh_token(config_dir, stored["claudeAiOauth"])
 
 
 def fetch_usage(token):
@@ -438,6 +592,28 @@ def window_line(label, window):
             f"{reset_str(window.get('resets_at'))} | font=Menlo{color(u)}")
 
 
+def scoped_limits(usage):
+    """[(label, window)] for model-scoped weekly limits in usage["limits"].
+
+    The API moved per-model weekly quotas out of the top-level
+    seven_day_opus/seven_day_sonnet fields (now always null) into a
+    "limits" array; entries scoped to a model carry a display name.
+    """
+    out = []
+    for entry in (usage or {}).get("limits") or []:
+        if not isinstance(entry, dict):
+            continue
+        scope = entry.get("scope")
+        model = scope.get("model") if isinstance(scope, dict) else None
+        name = model.get("display_name") if isinstance(model, dict) else None
+        percent = entry.get("percent")
+        if not name or not isinstance(percent, (int, float)):
+            continue
+        out.append((str(name).lower(),
+                    {"utilization": percent, "resets_at": entry.get("resets_at")}))
+    return out
+
+
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "toggle-hidden":
         toggle_hidden(sys.argv[2])
@@ -458,6 +634,11 @@ def main():
         usage = None
         if not err:
             usage, err = fetch_usage_cached(config_dir, token)
+            if err and err.startswith("token rejected"):
+                # stored expiry looked fine but the API disagreed: refresh once
+                token, refresh_err = force_refresh(config_dir)
+                if not refresh_err:
+                    usage, err = fetch_usage_cached(config_dir, token)
         results.append((label, usage, err))
 
     hidden = load_hidden()
@@ -493,9 +674,15 @@ def main():
             print(window_line("5-hour", five))
         if week:
             print(window_line("week", week))
-        for key, label in [("seven_day_opus", "opus"), ("seven_day_sonnet", "sonnet")]:
-            if usage.get(key):
-                print(window_line(label, usage[key]))
+        scoped = scoped_limits(usage)
+        for label, window in scoped:
+            print(window_line(label, window))
+        if not scoped:
+            # legacy shape: per-model quotas as top-level fields
+            for key, label in [("seven_day_opus", "opus"),
+                               ("seven_day_sonnet", "sonnet")]:
+                if usage.get(key):
+                    print(window_line(label, usage[key]))
         extra = usage.get("extra_usage") or {}
         if extra.get("is_enabled") and extra.get("used_credits"):
             # API reports credits in cents; monthly_limit is None when uncapped
