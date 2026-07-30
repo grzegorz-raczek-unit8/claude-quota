@@ -34,6 +34,15 @@ else
 fi
 chmod +x "$PLUGIN_DIR/claude-quota.5m.py"
 
+# Run the plugin once now, so the Keychain permission dialog (if any)
+# appears here in the terminal session rather than surprising the user
+# after install. Reads and the token-refresh write both go through
+# /usr/bin/security, so one "Always Allow" covers both.
+echo
+echo "Running the plugin once to warm up Keychain access."
+echo "If a Keychain dialog appears, click 'Always Allow'."
+"$PLUGIN_DIR/claude-quota.5m.py" >/dev/null || true
+
 open -a SwiftBar
 
 # Launch SwiftBar at login so the gauges survive a reboot
@@ -44,5 +53,3 @@ fi
 
 echo
 echo "Installed to $PLUGIN_DIR/claude-quota.5m.py"
-echo "If macOS shows a Keychain dialog, click 'Always Allow' so the widget"
-echo "can refresh unattended."

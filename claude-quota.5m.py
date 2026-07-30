@@ -271,7 +271,14 @@ def get_token(config_dir):
     creds = stored["claudeAiOauth"]
     expires_at = creds.get("expiresAt")
     if expires_at and expires_at / 1000 - REFRESH_MARGIN < time.time():
-        return refresh_token(config_dir, creds)
+        token, err = refresh_token(config_dir, creds)
+        if not err:
+            return token, None
+        if expires_at / 1000 > time.time():
+            # refresh failed (offline/throttled) but the current token is
+            # still inside its validity window — use it while it lasts
+            return creds.get("accessToken"), None
+        return None, err
     return creds.get("accessToken"), None
 
 
