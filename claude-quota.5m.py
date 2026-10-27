@@ -43,6 +43,9 @@ import zlib
 from datetime import datetime
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+# Cloudflare in front of the OAuth endpoints rejects urllib's default
+# "Python-urllib" User-Agent (error 1010), so identify the plugin instead.
+USER_AGENT = "claude-quota (+https://github.com/grzegorz-raczek-unit8/claude-quota)"
 ACCOUNTS_FILE = os.path.expanduser("~/.config/claude-quota/accounts")
 HIDDEN_FILE = os.path.expanduser("~/.config/claude-quota/hidden")
 
@@ -114,13 +117,14 @@ def discover_accounts():
 # Claude Code's own public OAuth client; the refresh flow is the same one
 # the CLI runs at startup when its access token has aged out.
 
-OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 REFRESH_TIMEOUT = 15    # seconds, network
 REFRESH_MARGIN = 60     # refresh once less than this much validity is left
 REFRESH_INTERVAL = 60   # never refresh an account more often than this
 
 STALE_ERROR = "token stale — run that CLI once to refresh"
+LOGGED_OUT_ERROR = "session expired - run /login in that CLI"
 
 
 def read_creds(config_dir):
@@ -227,13 +231,22 @@ def refresh_token(config_dir, creds):
     }).encode()
     req = urllib.request.Request(
         OAUTH_TOKEN_URL, data=body, method="POST",
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
     )
     try:
         with urllib.request.urlopen(req, timeout=REFRESH_TIMEOUT) as resp:
             payload = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            reason = json.loads(e.read()).get("error")
+        except Exception:
+            reason = None
+        if reason == "invalid_grant":
+            # the refresh token itself has expired or was revoked
+            return None, LOGGED_OUT_ERROR
+        return None, f"token refresh failed (HTTP {e.code})"
     except Exception:
-        return None, STALE_ERROR
+        return None, "offline?"
     access = payload.get("access_token") if isinstance(payload, dict) else None
     if not access:
         return None, STALE_ERROR
@@ -257,6 +270,12 @@ def store_refreshed(config_dir, payload):
     expires_in = payload.get("expires_in")
     if expires_in:
         creds["expiresAt"] = int((time.time() + expires_in) * 1000)
+    # Claude Code treats the account as logged out once this passes, so
+    # keep it in step with the server like the CLI does
+    refresh_expires_in = payload.get("refresh_token_expires_in")
+    if isinstance(refresh_expires_in, (int, float)):
+        creds["refreshTokenExpiresAt"] = int(
+            (time.time() + refresh_expires_in) * 1000)
     return write_creds(keychain_service(config_dir), stored, previous)
 
 
@@ -296,6 +315,7 @@ def fetch_usage(token):
         "Authorization": f"Bearer {token}",
         "anthropic-beta": "oauth-2025-04-20",
         "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
     })
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:

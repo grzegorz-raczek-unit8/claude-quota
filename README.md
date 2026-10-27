@@ -31,10 +31,14 @@ permission dialog on the first refresh, click **Always Allow**.
 
 ## How it works
 
-The plugin reads your Claude Code OAuth token from the macOS Keychain
-(**read-only** — it never refreshes or rewrites tokens, so it can't log you
-out) and queries the same usage endpoint that Claude Code's `/usage` screen
-uses. No passwords, no scraping, no third-party services.
+The plugin reads your Claude Code OAuth token from the macOS Keychain and
+queries the same usage endpoint that Claude Code's `/usage` screen uses. When
+the token expires, the plugin refreshes it with the same OAuth flow that
+Claude Code uses and writes the new token back to the Keychain. Claude Code
+then uses the new token too, so you do not have to start the CLI on this Mac
+to see current usage. The plugin backs up the previous credentials to
+`~/.cache/claude-quota/` before each write. No passwords, no scraping, no
+third-party services.
 
 > **Note:** that endpoint is internal to Claude Code and undocumented, so a
 > future Claude Code change may require a small fix here.
@@ -49,9 +53,10 @@ cd claude-quota
 
 Either install path sets up [SwiftBar](https://github.com/swiftbar/SwiftBar)
 via Homebrew if you don't have it, and adds it to your Login Items so the
-gauges come back after a reboot. If an account shows ⚠, its token went
-stale from disuse — run that `claude` CLI once and the widget recovers on the
-next cycle.
+gauges come back after a reboot. If an account shows ⚠ with "session
+expired", its refresh token is no longer valid (for example, the Mac was off
+for a long time). Run `/login` in that `claude` CLI. The widget recovers on
+the next cycle.
 
 ## Accounts
 
